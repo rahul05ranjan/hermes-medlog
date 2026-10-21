@@ -1,4 +1,6 @@
 """Tests for `medlog import-apple`. FAKE data only, in temp directories."""
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -473,6 +475,50 @@ class TestAfterMidnightDose(ImportAppleBase):
         self.run_import([self.apple("2030-01-11T09:05:00+13:00")], apply=True)
         (e,) = self.active()
         self.assertEqual((e["date"], e["slot"]), ("2030-01-11", "morning"))
+
+
+class TestMalformedRows(ImportAppleBase):
+    """A row that cannot be identified is a schema problem, not a no-op (#8)."""
+
+    def row(self, **over):
+        item = {"external_id": "a1", "medication": "Fake Apple", "status": "taken",
+                "start": "2030-01-10T09:05:00+13:00", "dose": 50, "unit": "mg"}
+        item.update(over)
+        return item
+
+    def test_a_document_of_rows_without_external_id_exits_2(self):
+        self.map({"Fake Apple": "fk_apple"})
+        self.add_daily()
+        f = Path(self.tmp.name) / "noid.json"
+        f.write_text(json.dumps([self.row(external_id=None), {"medication": "Fake Apple"}]))
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = medlog.main(["import-apple", str(f), "--apply"])
+        out = out.getvalue()
+        self.assertEqual(code, 2)
+        self.assertIn("malformed=2", out)
+        self.assertIn("imported=0", out)
+        self.assertIn("no usable external_id", err.getvalue())
+        # nothing was written: the store stays empty
+        self.assertEqual(medlog.store_for("fk_apple").events(), [])
+
+    def test_a_non_string_external_id_is_counted_not_dropped(self):
+        self.map({"Fake Apple": "fk_apple"})
+        self.add_daily()
+        f = Path(self.tmp.name) / "mixed.json"
+        f.write_text(json.dumps([self.row(), self.row(external_id=7)]))
+        out, code = self._run(["import-apple", str(f), "--apply"])
+        self.assertEqual(code, 0)
+        self.assertIn("imported=1", out)
+        self.assertIn("malformed=1", out)
+
+    def test_an_empty_document_is_unchanged(self):
+        f = Path(self.tmp.name) / "empty.json"
+        f.write_text("[]")
+        out, code = self._run(["import-apple", str(f)])
+        self.assertEqual(code, 0)
+        self.assertIn("malformed=0", out)
 
 
 class TestAutoImport(ImportAppleBase):

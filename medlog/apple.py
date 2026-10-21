@@ -241,14 +241,18 @@ def cmd_import_apple(args) -> int:
     corrections = []  # (old event, new Apple event): Health time wins
     superseded = set()
     seen_ids = set()
-    counts = {"imported": 0, "duplicates": 0, "ignored": 0, "unmapped": 0, "mismatches": 0, "corrected": 0}
+    counts = {"imported": 0, "duplicates": 0, "ignored": 0, "unmapped": 0, "mismatches": 0, "corrected": 0, "malformed": 0}
     unmapped_names = []
 
     for item in data:
         if not isinstance(item, dict) or "external_id" not in item:
+            # A row that cannot be identified is a schema problem, not a no-op:
+            # it is counted and reported below, never silently dropped.
+            counts["malformed"] += 1
             continue
         ext = item["external_id"]
         if not isinstance(ext, str):
+            counts["malformed"] += 1
             continue
         status = classify_status(item.get("status", ""))
         if status == "ignored":
@@ -313,15 +317,23 @@ def cmd_import_apple(args) -> int:
     print(f"import-apple: imported={counts['imported']} duplicates={counts['duplicates']} "
           f"ignored={counts['ignored']} unmapped={counts['unmapped']} "
           f"mismatches={counts['mismatches']} ({'applied' if do_apply else 'dry-run'}) "
-          f"corrected={counts['corrected']}" + (f" held={held}" if held else ""))
-    if auto and (counts["imported"] or counts["corrected"] or held):
+          f"corrected={counts['corrected']} malformed={counts['malformed']}" + (f" held={held}" if held else ""))
+    if counts["malformed"]:
+        print(f"medlog import-apple: {counts['malformed']} row(s) skipped: no usable "
+              f"external_id (export schema change?)", file=sys.stderr)
+    if auto and (counts["imported"] or counts["corrected"] or held or counts["malformed"]):
         # Counts only, never names or doses.
         with open(data_dir() / "auto-import.log", "a", encoding="utf-8") as log:
             log.write(f"{now().isoformat()} file={Path(args.file).name} imported={counts['imported']} "
                       f"corrected={counts['corrected']} duplicates={counts['duplicates']} "
-                      f"mismatches={counts['mismatches']} result={'held:' + held if held else 'applied'}\n")
+                      f"mismatches={counts['mismatches']} malformed={counts['malformed']} "
+                      f"result={'held:' + held if held else 'applied'}\n")
     for old, new in corrections:
         print(f"correct: {new['med']} {new['date']} {new['slot'] or ''} {old.get('time') or 'no time'} -> {new['time']}")
     if names:
         print(f"unmapped: {names}")
+    if data and counts["malformed"] == len(data):
+        # An entire document skipped for a structural reason is a schema
+        # problem, not a no-op: report it like invalid input.
+        return 2
     return 0
