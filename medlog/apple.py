@@ -17,6 +17,7 @@ case-insensitive {display name: registry id}.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from datetime import datetime, timedelta
@@ -97,12 +98,22 @@ def _is_count(event: dict, med: dict | None = None) -> bool:
 
 
 def _dose_diff(existing: dict, event: dict, med: dict | None = None) -> float:
+    """The dose difference between two records, or inf when either is non-finite.
+
+    NaN and infinity never read as "no difference": every comparison against a
+    NaN is False, so a non-finite dose on either side must read as the largest
+    possible mismatch instead of slipping past the guard (#1).
+    """
     if _is_count(event, med):
         return 0.0
     try:
-        return abs(float(existing.get("dose")) - float(event.get("dose")))
+        recorded = float(existing.get("dose"))
+        incoming = float(event.get("dose"))
     except (TypeError, ValueError):
         return 0.0
+    if not (math.isfinite(recorded) and math.isfinite(incoming)):
+        return float("inf")
+    return abs(recorded - incoming)
 
 
 def attribute(med: dict, new_dt: datetime) -> tuple[str, str | None]:
@@ -218,11 +229,24 @@ def build_event(event: dict, new_dt: datetime, med_id: str) -> dict:
     }
 
 
+def _reject_nonfinite(literal: str):
+    """A parse_constant hook: the bare NaN/Infinity tokens are not valid JSON.
+
+    A strict consumer of events.jsonl rejects them, and a non-finite dose can
+    never mean a real amount, so an export carrying one is refused at the
+    parse boundary (#1) instead of poisoning the log.
+    """
+    raise ValueError(f"non-finite JSON literal {literal} in the export")
+
+
 def cmd_import_apple(args) -> int:
     """Import an Apple Health medication export. Returns exit code."""
     try:
-        data = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        data = json.loads(Path(args.file).read_text(encoding="utf-8"),
+                          parse_constant=_reject_nonfinite)
+    except (FileNotFoundError, ValueError) as exc:
+        # json.JSONDecodeError is a ValueError, and so is a rejected
+        # NaN/Infinity token: both are schema problems in the export (#1).
         print(f"medlog import-apple: {exc}", file=sys.stderr)
         return 2
     if not isinstance(data, list):
